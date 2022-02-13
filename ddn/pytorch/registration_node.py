@@ -145,31 +145,31 @@ class PointCloudRegistration(AbstractDeclarativeNode):
                 assert cloud_tgt_demean_i.shape[0] == 3
                 assert cloud_src_demean_i.shape[1] == 3
                 assert cloud_tgt_demean_i.shape[1] == 3
-                T_i = self._solve_transformation(cloud_src_centroid_i, cloud_tgt_centroid_i, cloud_src_demean_i, cloud_tgt_demean_i)
+                T_i = self._solve_transformation(cloud_src_i, cloud_tgt_i)
                 n_inliers_i = self._calculate_number_of_inliers(cloud_src_np[b_i, :, :], cloud_tgt_np[b_i, :, :], T_i, reprojection_error_threshold)
                 if n_inliers_i > N * 0.85:
                     break
             T[b_i, :] = torch.from_numpy(T_i).double()
         return T
 
-    def _solve_transformation(self, cloud_src_centroid, cloud_tgt_centroid, cloud_src_demean, cloud_tgt_demean):
+    def _solve_transformation(self, cloud_src, cloud_tgt):
         T = np.zeros((1, 6))
         # calculate optimal rotation matrix
         # H = cloud_src_demean.float() @ cloud_tgt_demean.float().T
         # U, S, VH = np.linalg.svd(H)
         # R = VH.T @ U.T
-        TE = open3d.registration.TransformationEstimationPointToPoint()
+        TE = open3d.pipelines.registration.TransformationEstimationPointToPoint()
         corr = np.zeros((3, 2))
         corr[:, 0] = np.arange(0, 3)
         corr[:, 1] = np.arange(0, 3)
         cloud_src_cloud = open3d.geometry.PointCloud()
         cloud_tgt_cloud = open3d.geometry.PointCloud()
-        cloud_src_cloud.points = open3d.utility.Vector3dVector(cloud_src_demean.detach().cpu().numpy())
-        cloud_tgt_cloud.points = open3d.utility.Vector3dVector(cloud_tgt_demean.detach().cpu().numpy())
+        cloud_src_cloud.points = open3d.utility.Vector3dVector(cloud_src.detach().cpu().numpy())
+        cloud_tgt_cloud.points = open3d.utility.Vector3dVector(cloud_tgt.detach().cpu().numpy())
         transformation_o3d = TE.compute_transformation(cloud_src_cloud, cloud_tgt_cloud, open3d.utility.Vector2iVector(corr))
 
         # calculate optimal translation vector
-        t = cloud_tgt_centroid - transformation_o3d[:3, :3] @ cloud_src_centroid
+        t = transformation_o3d[:3, 3]
         R_axis_angle = Rotation.from_matrix(transformation_o3d[:3, :3]).as_rotvec()
         T[0, :3] = R_axis_angle
         T[0, 3:] = t
