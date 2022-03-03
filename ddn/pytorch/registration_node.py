@@ -5,10 +5,12 @@
 
 from scipy.spatial import transform
 import torch
+from kornia.geometry import conversions 
 import open3d
 import numpy as np
 import random
 from scipy.spatial.transform import Rotation
+import copy
 
 from ddn.pytorch.node import *
 import ddn.pytorch.geometry_utilities as geo
@@ -117,62 +119,79 @@ class PointCloudRegistration(AbstractDeclarativeNode):
     def _ransac_solve_transformation(self, cloud_src, cloud_tgt, max_num_iterations, reprojection_error_threshold):
         T = cloud_src.new_zeros(cloud_src.size(0), 6)
         b, N, _ = cloud_src.shape
-        cloud_src_np = cloud_src.cpu().numpy()
-        cloud_tgt_np = cloud_tgt.cpu().numpy()
+        # cloud_src_np = cloud_src.cpu().numpy()
+        # cloud_tgt_np = cloud_tgt.cpu().numpy()
 
-        # calculate centroid of cloud_src and cloud_tgt
-        cloud_src_centroid = np.average(cloud_src_np, axis = 1)
-        cloud_tgt_centroid = np.average(cloud_tgt_np, axis = 1)
-        assert cloud_src_centroid.shape[1] == 3
-        assert cloud_tgt_centroid.shape[1] == 3
+        # # calculate centroid of cloud_src and cloud_tgt
+        # cloud_src_centroid = np.average(cloud_src_np, axis = 1)
+        # cloud_tgt_centroid = np.average(cloud_tgt_np, axis = 1)
+        # assert cloud_src_centroid.shape[1] == 3
+        # assert cloud_tgt_centroid.shape[1] == 3
 
-        # centralize point clouds to zero
-        cloud_src_centroid_repeat = np.repeat(cloud_src_centroid[:, np.newaxis, :], N, axis = 1)
-        cloud_tgt_centroid_repeat = np.repeat(cloud_tgt_centroid[:, np.newaxis, :], N, axis = 1)
-        cloud_src_demean = cloud_src_np - cloud_src_centroid_repeat
-        cloud_tgt_demean = cloud_tgt_np - cloud_tgt_centroid_repeat
+        # # centralize point clouds to zero
+        # cloud_src_centroid_repeat = np.repeat(cloud_src_centroid[:, np.newaxis, :], N, axis = 1)
+        # cloud_tgt_centroid_repeat = np.repeat(cloud_tgt_centroid[:, np.newaxis, :], N, axis = 1)
+        # cloud_src_demean = cloud_src_np - cloud_src_centroid_repeat
+        # cloud_tgt_demean = cloud_tgt_np - cloud_tgt_centroid_repeat
         
         for b_i in range(b):
-            for _ in range(5 * max_num_iterations):
+            for _ in range(max_num_iterations):
                 random_idx = random.sample(range(N), 3)
                 cloud_src_i = cloud_src[b_i, random_idx, :]
                 cloud_tgt_i = cloud_tgt[b_i, random_idx, :]
                 
                 T_i = self._solve_transformation(cloud_src_i, cloud_tgt_i)
-                n_inliers_i = self._calculate_number_of_inliers(cloud_src_np[b_i, :, :], cloud_tgt_np[b_i, :, :], T_i, reprojection_error_threshold)
-                if n_inliers_i > N * 0.85:
+                n_inliers_i = self._calculate_number_of_inliers(cloud_src[b_i], cloud_tgt[b_i], T_i, reprojection_error_threshold)
+                print(n_inliers_i / N)
+                if n_inliers_i > N * 0.80:
                     break
-            T[b_i, :] = torch.from_numpy(T_i).double()
+            T[b_i, :] = T_i.double()
         return T
 
     def _solve_transformation(self, cloud_src, cloud_tgt):
-        T = np.zeros((1, 6))
-        # calculate optimal rotation matrix
-        # H = cloud_src_demean.float() @ cloud_tgt_demean.float().T
-        # U, S, VH = np.linalg.svd(H)
-        # R = VH.T @ U.T
+        T = torch.zeros(1, 6).to(self.device)
         TE = open3d.t.pipelines.registration.TransformationEstimationPointToPoint()
-        corr = torch.zeros(3, 1, dtype = torch.int64)
+
+        corr = torch.zeros(3, 1, dtype = torch.int64).cuda(0)
         corr[:, 0] = torch.arange(0, 3)
-        cloud_src_cloud = open3d.t.geometry.PointCloud()
-        cloud_tgt_cloud = open3d.t.geometry.PointCloud()
+        cloud_src_cloud = open3d.t.geometry.PointCloud(device=open3d.core.Device("CUDA:0"))
+        cloud_tgt_cloud = open3d.t.geometry.PointCloud(device=open3d.core.Device("CUDA:0"))
         cloud_src_cloud.point["positions"] = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(cloud_src))
         cloud_tgt_cloud.point["positions"] = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(cloud_tgt))
-        transformation_o3d = TE.compute_transformation(cloud_src_cloud, cloud_tgt_cloud, open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(corr)))
+        corr_o3d_tensor = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(corr))
+
+        transformation_o3d = TE.compute_transformation(cloud_src_cloud, cloud_tgt_cloud, corr_o3d_tensor)
         # calculate optimal translation vector
-        t = transformation_o3d[:3, 3].numpy()
-        R_axis_angle = Rotation.from_matrix(transformation_o3d[:3, :3].numpy()).as_rotvec()
+        t = transformation_o3d[:3, 3]
+        R_axis_angle = conversions.rotation_matrix_to_angle_axis(torch.utils.dlpack.from_dlpack(transformation_o3d[:3, :3].to_dlpack()).contiguous())
         T[0, :3] = R_axis_angle
-        T[0, 3:] = t
+        T[0, 3:] = torch.utils.dlpack.from_dlpack(t.to_dlpack())
 
         return T
 
     def _calculate_number_of_inliers(self, cloud_src, cloud_tgt, T, transformation_error_threshold):
-        cloud_src_transformed = geo.transform_points_by_theta(torch.from_numpy(cloud_src).unsqueeze(0).double(), torch.from_numpy(T).double())
+        # rot_mat = Rotation.from_rotvec(T[0, :3]).as_matrix()
+        tf_mat = torch.zeros(4, 4).to(self.device)
+        q = conversions.angle_axis_to_quaternion(T[0, :3].view(1, 3))
+
+        tf_mat[:3, :3] = conversions.quaternion_to_rotation_matrix(q)
+        tf_mat[:3, 3] = T[0, 3:]
+        tf_mat[3, 3] = 1
+    
+        # cloud_src_transformed = geo.transform_points_by_theta(torch.from_numpy(cloud_src).unsqueeze(0).double(), torch.from_numpy(T).double())
+        cloud_src_cloud = open3d.t.geometry.PointCloud(device=open3d.core.Device("CUDA:0"))
+        cloud_src_cloud.point["positions"] = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(cloud_src))
+
+        # transform src point cloud
+        tf_mat_o3d_tensor = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(tf_mat))
+        cloud_src_transformed = cloud_src_cloud.clone().cuda(0).transform(tf_mat_o3d_tensor)
         # calculate number of correspondences that is within the threshold
-        transformation_error = np.linalg.norm((cloud_src_transformed - cloud_tgt), axis = 2)
+        transformation_error = torch.norm((torch.utils.dlpack.from_dlpack(cloud_src_transformed.point["positions"].to_dlpack()) - cloud_tgt), dim = 1)
+        print(transformation_error)
         # print(transformation_error)
-        number_of_inliers = np.sum(transformation_error < transformation_error_threshold)
+        number_of_inliers = torch.sum(transformation_error < transformation_error_threshold)
+        print(transformation_error < transformation_error_threshold)
+        print(number_of_inliers)
         # print(number_of_inliers)
         return number_of_inliers
 

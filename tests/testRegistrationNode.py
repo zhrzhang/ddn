@@ -20,18 +20,18 @@ from ddn.pytorch.registration_node import *
 b = 4
 N = 12
 torch.manual_seed(0)
-cloud_src_test = torch.randn(b, N, 3, dtype=torch.double)
+cloud_src_test = torch.randn(b, N, 3, dtype=torch.double, device = torch.device('cuda'))
 R_test = torch.tensor(
     [[0.8660254, -0.5000000,  0.0000000],
      [0.5000000, 0.8660254, 0.0000000],
-     [0.0000000, 0.0000000, 1.0000000]], dtype=torch.double)
+     [0.0000000, 0.0000000, 1.0000000]], dtype=torch.double, device = torch.device('cuda'))
 R_test_batch = R_test.unsqueeze(0).repeat(b, 1, 1)
-t_test = torch.randn(b, 3)
+t_test = torch.randn(b, 3, device = torch.device('cuda'))
 cloud_tgt_test = torch.einsum('brs,bms->bmr', (R_test_batch, cloud_src_test)) + t_test.unsqueeze(1)
 
 cloud_tgt_verify = R_test_batch[0, :, :] @ cloud_src_test[0, :, :].T
 
-cloud_tgt_test_noisy = cloud_tgt_test + 0.04 * torch.randn(b, N, 3, dtype = torch.double) # add noise
+cloud_tgt_test_noisy = cloud_tgt_test + 0.04 * torch.randn(b, N, 3, dtype = torch.double, device = torch.device('cuda')) # add noise
 # p2d[:, 0:1, :] = torch.randn(b, 1, 2, dtype=torch.double) # add outliers
 
 # Plot:
@@ -42,7 +42,7 @@ cloud_tgt_test_noisy = cloud_tgt_test + 0.04 * torch.randn(b, N, 3, dtype = torc
 # plt.scatter(p3d_proj_np[0, :, 0], p3d_proj_np[0, :, 1], s=10, c='r', alpha=1.0, marker='o')
 # plt.show()
 
-w = torch.ones(b, N, dtype=torch.double) # bxn
+w = torch.ones(b, N, dtype=torch.double, device = torch.device('cuda')) # bxn
 w = w.abs() # Weights must be positive and sum to 1 per batch element
 w = w.div(w.sum(-1).unsqueeze(-1))
 
