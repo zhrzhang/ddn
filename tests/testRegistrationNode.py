@@ -10,6 +10,7 @@ import torch
 from torch.autograd import grad
 from torch.autograd import gradcheck
 from scipy.spatial.transform import Rotation
+from kornia.geometry import conversions
 
 import sys
 
@@ -50,7 +51,7 @@ w = w.div(w.sum(-1).unsqueeze(-1))
 # node = PnP(objective_type='cosine')
 node = PointCloudRegistration(objective_type='reproj', chunk_size=None)
 # node = PnP(objective_type='reproj_huber', alpha=0.1)
-DL = DeclarativeLayer(node)
+DL = DeclarativeLayer(node).cuda()
 
 cloud_src_test = cloud_src_test.requires_grad_()
 cloud_tgt_test_noisy = cloud_tgt_test_noisy.requires_grad_()
@@ -66,9 +67,11 @@ f = node.objective(cloud_src_test, cloud_tgt_test_noisy, w, y=y)
 
 # Compute gradient:
 Dy = grad(y, (cloud_src_test, cloud_tgt_test_noisy, w), grad_outputs=torch.ones_like(y))
-y_gt = np.zeros((b, 6))
+y_gt = torch.zeros(b, 6, device = torch.device('cuda'))
 
-y_gt[:, :3] = Rotation.from_matrix(R_test).as_rotvec()
+# y_gt[:, :3] = Rotation.from_matrix(R_test).as_rotvec()
+# y_gt[:, 3 : 6] = t_test
+y_gt[:, :3] = conversions.rotation_matrix_to_angle_axis(R_test)
 y_gt[:, 3 : 6] = t_test
 
 # print("Input p2d:\n{}".format(p2d.detach().cpu().numpy()))

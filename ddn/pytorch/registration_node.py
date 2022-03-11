@@ -100,11 +100,11 @@ class PointCloudRegistration(AbstractDeclarativeNode):
         return torch.einsum('bn,bn->b', (w, huber(z2, self.alpha)))
 
     def solve(self, cloud_src, cloud_tgt, w):
-        cloud_src = cloud_src.detach()
-        cloud_tgt = cloud_tgt.detach()
-        w = w.detach()
+        cloud_src = cloud_src.detach().clone().requires_grad_()
+        cloud_tgt = cloud_tgt.detach().clone().requires_grad_()
+        w = w.detach().clone()
         T = self._initialise_transformation(cloud_src, cloud_tgt, w).requires_grad_()
-        T = self._run_optimisation(cloud_src, cloud_tgt, w, y=T)
+        T = self._run_optimisation(cloud_src, cloud_tgt, w, y=T).requires_grad_()
         # # Alternatively, disentangle batch element optimisation:
         # for i in range(p2d.size(0)):
         #     Ki = K[i:(i+1),...] if K is not None else None
@@ -117,7 +117,7 @@ class PointCloudRegistration(AbstractDeclarativeNode):
             self.ransac_max_num_iterations, self.ransac_threshold)
 
     def _ransac_solve_transformation(self, cloud_src, cloud_tgt, max_num_iterations, reprojection_error_threshold):
-        T = cloud_src.new_zeros(cloud_src.size(0), 6)
+        T = cloud_src.new_zeros(cloud_src.size(0), 6, requires_grad=True)
         b, N, _ = cloud_src.shape
         # cloud_src_np = cloud_src.cpu().numpy()
         # cloud_tgt_np = cloud_tgt.cpu().numpy()
@@ -137,8 +137,8 @@ class PointCloudRegistration(AbstractDeclarativeNode):
         for b_i in range(b):
             for _ in range(max_num_iterations):
                 random_idx = random.sample(range(N), 3)
-                cloud_src_i = cloud_src[b_i, random_idx, :]
-                cloud_tgt_i = cloud_tgt[b_i, random_idx, :]
+                cloud_src_i = cloud_src[b_i, random_idx, :].clone()
+                cloud_tgt_i = cloud_tgt[b_i, random_idx, :].clone()
                 
                 T_i = self._solve_transformation(cloud_src_i, cloud_tgt_i)
                 n_inliers_i = self._calculate_number_of_inliers(cloud_src[b_i], cloud_tgt[b_i], T_i, reprojection_error_threshold)
@@ -149,7 +149,7 @@ class PointCloudRegistration(AbstractDeclarativeNode):
         return T
 
     def _solve_transformation(self, cloud_src, cloud_tgt):
-        T = torch.zeros(1, 6).to(self.device)
+        T = torch.zeros(1, 6).to(self.device).requires_grad_()
         TE = open3d.t.pipelines.registration.TransformationEstimationPointToPoint()
 
         corr = torch.zeros(3, 1, dtype = torch.int64).cuda(0)
@@ -160,6 +160,9 @@ class PointCloudRegistration(AbstractDeclarativeNode):
         cloud_tgt_cloud.point["positions"] = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(cloud_tgt))
         corr_o3d_tensor = open3d.core.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(corr))
 
+        print(cloud_src_cloud)
+        print(cloud_tgt_cloud)
+        print(corr_o3d_tensor)
         transformation_o3d = TE.compute_transformation(cloud_src_cloud, cloud_tgt_cloud, corr_o3d_tensor)
         # calculate optimal translation vector
         t = transformation_o3d[:3, 3]
@@ -173,7 +176,6 @@ class PointCloudRegistration(AbstractDeclarativeNode):
         # rot_mat = Rotation.from_rotvec(T[0, :3]).as_matrix()
         tf_mat = torch.zeros(4, 4).to(self.device)
         q = conversions.angle_axis_to_quaternion(T[0, :3].view(1, 3))
-
         tf_mat[:3, :3] = conversions.quaternion_to_rotation_matrix(q)
         tf_mat[:3, 3] = T[0, 3:]
         tf_mat[3, 3] = 1
